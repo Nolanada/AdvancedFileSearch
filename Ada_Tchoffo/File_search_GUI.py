@@ -1,155 +1,112 @@
 import os
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
-from pathlib import Path
-from docx import Document
-import PyPDF2
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
+from tkinter import filedialog, ttk
+from sentence_transformers import SentenceTransformer, util
 import numpy as np
+import torch
+import joblib  # for saving model
+import PyPDF2
+from docx import Document
 
-# -------- File Readers --------
-def extract_text_from_txt(file_path):
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read()
-    except:
-        return ""
+# Load or initialize the semantic model
+model = SentenceTransformer('all-MiniLM-L6-v2')
+joblib.dump(model, 'best_model.h5')  # Save model to 'best_model.h5'
 
-def extract_text_from_pdf(file_path):
-    try:
-        with open(file_path, 'rb') as f:
-            reader = PyPDF2.PdfReader(f)
-            return " ".join(page.extract_text() or "" for page in reader.pages)
-    except:
-        return ""
+def extract_text_from_file(filepath):
+    text = ""
+    if filepath.endswith(".txt"):
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            text = f.read()
+    elif filepath.endswith(".pdf"):
+        try:
+            with open(filepath, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                for page in reader.pages:
+                    text += page.extract_text()
+        except:
+            pass
+    elif filepath.endswith(".docx"):
+        try:
+            doc = Document(filepath)
+            for para in doc.paragraphs:
+                text += para.text
+        except:
+            pass
+    return text
 
-def extract_text_from_docx(file_path):
-    try:
-        doc = Document(file_path)
-        return "\n".join(p.text for p in doc.paragraphs)
-    except:
-        return ""
-
-# -------- Main App --------
-class FileSearchApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Intelligent File Search")
-        self.root.geometry("800x550")
-
-        self.folder_path = None
-        self.files = []
-        self.model = SentenceTransformer('paraphrase-MiniLM-L6-v2')  # Pretrained SentenceTransformer
-
-        # --- UI Layout ---
-        self.label = tk.Label(root, text="Choose Search Directory", font=("Arial", 13))
-        self.label.pack(pady=10)
-
-        self.select_btn = tk.Button(root, text="Select Folder", command=self.select_folder)
-        self.select_btn.pack()
-
-        self.search_mode = tk.StringVar(value="name")
-        self.dropdown = ttk.Combobox(root, textvariable=self.search_mode, values=["Search by File Name", "Search by File Content", "Semantic Search (AI)"], state="readonly")
-        self.dropdown.pack(pady=10)
-
-        self.search_entry = tk.Entry(root, width=50)
-        self.search_entry.pack(pady=5)
-
-        self.search_btn = tk.Button(root, text="Search", command=self.run_search)
-        self.search_btn.pack(pady=5)
-
-        self.tree = ttk.Treeview(root, columns=('Name', 'Path'), show='headings')
-        self.tree.heading('Name', text='File Name')
-        self.tree.heading('Path', text='Full Path')
-        self.tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-    def select_folder(self):
-        folder = filedialog.askdirectory()
-        if folder:
-            self.folder_path = folder
-            messagebox.showinfo("Folder Selected", f"Search folder set to:\n{folder}")
-
-    def run_search(self):
-        mode = self.search_mode.get()
-        query = self.search_entry.get().strip().lower()
-
-        if not self.folder_path:
-            messagebox.showwarning("No Folder", "Please select a folder first.")
-            return
-
-        if not query:
-            messagebox.showwarning("No Query", "Please enter a search query.")
-            return
-
-        self.tree.delete(*self.tree.get_children())  # Clear previous results
-
-        if "Name" in mode:
-            self.search_by_name(query)
-        elif "Content" in mode:
-            self.search_by_content(query)
-        else:
-            self.semantic_search(query)
-
-    def search_by_name(self, query):
-        for root_dir, _, files in os.walk(self.folder_path):
+def search_files(directory, query, mode):
+    results = []
+    query_lower = query.lower()
+    if mode == "Search by File Name":
+        for root, _, files in os.walk(directory):
             for file in files:
-                if query in file.lower():
-                    full_path = os.path.join(root_dir, file)
-                    self.tree.insert('', tk.END, values=(file, full_path))
-
-    def search_by_content(self, query):
-        supported_exts = {'.txt', '.pdf', '.docx'}
-
-        for root_dir, _, files in os.walk(self.folder_path):
+                if query_lower in file.lower():
+                    results.append((file, query, os.path.join(root, file), 'N/A'))
+    elif mode == "Search by File Content":
+        for root, _, files in os.walk(directory):
             for file in files:
-                ext = Path(file).suffix.lower()
-                if ext not in supported_exts:
-                    continue
-
-                full_path = os.path.join(root_dir, file)
-                content = ""
-                if ext == '.txt':
-                    content = extract_text_from_txt(full_path)
-                elif ext == '.pdf':
-                    content = extract_text_from_pdf(full_path)
-                elif ext == '.docx':
-                    content = extract_text_from_docx(full_path)
-
-                if query in content.lower():
-                    self.tree.insert('', tk.END, values=(file, full_path))
-
-    def semantic_search(self, query):
-        supported_exts = {'.txt', '.pdf', '.docx'}
-        query_embedding = self.model.encode([query])[0]  # Encode the query
-
-        # Iterate through files
-        for root_dir, _, files in os.walk(self.folder_path):
+                path = os.path.join(root, file)
+                content = extract_text_from_file(path).lower()
+                if query_lower in content:
+                    results.append((file, query, path, 'N/A'))
+    elif mode == "Semantic Search (AI)":
+        query_embedding = model.encode(query, convert_to_tensor=True)
+        for root, _, files in os.walk(directory):
             for file in files:
-                ext = Path(file).suffix.lower()
-                if ext not in supported_exts:
-                    continue
+                path = os.path.join(root, file)
+                content = extract_text_from_file(path)
+                if content:
+                    content_embedding = model.encode(content, convert_to_tensor=True)
+                    similarity = util.pytorch_cos_sim(query_embedding, content_embedding).item()
+                    if similarity > 0.4:  # Threshold
+                        results.append((file, query, path, round(similarity, 3)))
+    return results
 
-                full_path = os.path.join(root_dir, file)
-                content = ""
-                if ext == '.txt':
-                    content = extract_text_from_txt(full_path)
-                elif ext == '.pdf':
-                    content = extract_text_from_pdf(full_path)
-                elif ext == '.docx':
-                    content = extract_text_from_docx(full_path)
+# === Tkinter UI ===
+def browse_directory():
+    folder_selected = filedialog.askdirectory()
+    if folder_selected:
+        entry_dir.delete(0, tk.END)
+        entry_dir.insert(0, folder_selected)
 
-                file_embedding = self.model.encode([content])[0]  # Embed file content
+def perform_search():
+    directory = entry_dir.get()
+    query = entry_query.get()
+    mode = combo_mode.get()
+    if not directory or not query:
+        return
+    result_text.delete('1.0', tk.END)
+    matches = search_files(directory, query, mode)
+    if matches:
+        for file, search, path, similarity in matches:
+            result_text.insert(tk.END, f"File: {file}\nSearch: {search}\nPath: {path}\nSimilarity: {similarity}\n\n")
+    else:
+        result_text.insert(tk.END, "No matches found.")
 
-                # Compare using cosine similarity
-                similarity = cosine_similarity([query_embedding], [file_embedding])[0][0]
+# UI Setup
+root = tk.Tk()
+root.title("Intelligent File Search")
 
-                # If similarity is high enough, display the result
-                if similarity > 0.5:  # You can adjust the threshold for relevance
-                    self.tree.insert('', tk.END, values=(file, full_path))
+tk.Label(root, text="Select Directory:").grid(row=0, column=0, sticky="w")
+entry_dir = tk.Entry(root, width=60)
+entry_dir.grid(row=0, column=1, padx=5)
+tk.Button(root, text="Browse", command=browse_directory).grid(row=0, column=2)
 
-# -------- Run App --------
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = FileSearchApp(root)
-    root.mainloop()
+tk.Label(root, text="Enter Search Query:").grid(row=1, column=0, sticky="w")
+entry_query = tk.Entry(root, width=60)
+entry_query.grid(row=1, column=1, padx=5)
+
+combo_mode = ttk.Combobox(root, values=[
+    "Search by File Name",
+    "Search by File Content",
+    "Semantic Search (AI)"
+])
+combo_mode.current(0)
+combo_mode.grid(row=1, column=2)
+
+tk.Button(root, text="Search", command=perform_search).grid(row=2, column=1, pady=10)
+
+result_text = tk.Text(root, width=100, height=30)
+result_text.grid(row=3, column=0, columnspan=3, padx=10, pady=10)
+
+root.mainloop()
